@@ -1,0 +1,6 @@
+blenderproc run script.py "Data/3D-FRONT/00add26c-7a26-4a61-b192-b97aa493b3f3.json" "Data/3D-FUTURE-model" "Data/3D-FRONT-texture" output2
+
+
+
+blenderproc debug script.py "deneme/x.json" "Data/3D-FUTURE-model" "Data/3D-FRONT-texture" "deneme/out_sil"
+
