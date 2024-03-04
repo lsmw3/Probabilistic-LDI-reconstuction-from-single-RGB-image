@@ -1,0 +1,121 @@
+data:
+  params:
+    batch_size: 4
+    num_workers: 4
+    test:
+      params:
+        apply_positional_encoding: false
+        size: 256
+      target: utils.dataloader.LayeredDepthImageTest
+    wrap: false
+  target: main.DataModuleFromConfig
+lightning:
+  callbacks:
+    early_stop:
+      params:
+        check_on_train_epoch_end: false
+        mode: min
+        monitor: val/loss_simple_ema
+        patience: 15
+        verbose: true
+      target: pytorch_lightning.callbacks.EarlyStopping
+    image_logger:
+      params:
+        batch_frequency: 5000
+        clamp: false
+        increase_log_steps: true
+        log_on_batch_idx: true
+        max_images: 8
+      target: main.ImageLogger
+  trainer:
+    benchmark: true
+model:
+  base_learning_rate: 5.0e-05
+  params:
+    channels: 4
+    ckpt_path: logs/train_on_larger_dataset/checkpoints/best_model_epoch=000149.ckpt
+    concat_mode: true
+    cond_stage_config:
+      params:
+        config:
+          attn_resolutions: []
+          ch: 64
+          ch_mult:
+          - 1
+          - 2
+          - 4
+          double_z: false
+          dropout: 0.0
+          in_channels: 3
+          num_res_blocks: 2
+          out_ch: 3
+          resolution: 256
+          z_channels: 4
+      target: modules.encoders.modules.KL_Encoder
+    cond_stage_key: rgb
+    cond_stage_trainable: true
+    first_stage_config:
+      params:
+        ckpt_path: models/pre_trained_weights/kl-f4/train_on_7k.ckpt
+        ddconfig:
+          attn_resolutions: []
+          ch: 64
+          ch_mult:
+          - 1
+          - 2
+          - 4
+          double_z: true
+          dropout: 0.0
+          in_channels: 3
+          num_res_blocks: 2
+          out_ch: 3
+          resolution: 256
+          z_channels: 4
+        embed_dim: 4
+        lossconfig:
+          target: torch.nn.Identity
+      target: models.autoencoder.AutoencoderKL
+    first_stage_key: ldi
+    image_size: 64
+    linear_end: 0.0155
+    linear_start: 0.0015
+    log_every_t: 200
+    loss_path: loss_logs/train_on_7k_seed163
+    loss_type: l2
+    monitor: val/loss_simple_ema
+    num_timesteps_cond: 1
+    scale_by_std: true
+    scheduler_config:
+      params:
+        cycle_lengths:
+        - 10000000000000
+        f_max:
+        - 1.0
+        f_min:
+        - 1.0
+        f_start:
+        - 1.0e-06
+        warm_up_steps:
+        - 10000
+      target: lr_scheduler.LambdaLinearScheduler
+    timesteps: 1000
+    unet_config:
+      params:
+        attention_resolutions:
+        - 16
+        - 8
+        channel_mult:
+        - 1
+        - 2
+        - 2
+        - 4
+        image_size: 64
+        in_channels: 8
+        model_channels: 160
+        num_heads: 32
+        num_res_blocks: 2
+        out_channels: 4
+        resblock_updown: true
+        use_scale_shift_norm: true
+      target: modules.diffusionmodules.openaimodel.UNetModel
+  target: models.diffusion.ddpm.LatentDiffusion

@@ -38,8 +38,8 @@ data = {
     "data": {
         "target": "main.DataModuleFromConfig",
         "params": {
-            "batch_size": 8,
-            "num_workers": 8,
+            "batch_size": 2,
+            "num_workers": 4,
             "wrap": True,
             "train": {
                 "target": "utils.dataloader.LayeredDepthImageTrain",

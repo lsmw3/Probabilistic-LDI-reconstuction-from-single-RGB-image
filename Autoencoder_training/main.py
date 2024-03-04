@@ -4,6 +4,7 @@ import time
 import torch
 import torchvision
 import pytorch_lightning as pl
+import random
 
 from packaging import version
 from omegaconf import OmegaConf
@@ -13,7 +14,7 @@ from PIL import Image
 
 from pytorch_lightning import seed_everything
 from pytorch_lightning.trainer import Trainer
-from pytorch_lightning.callbacks import ModelCheckpoint, Callback, LearningRateMonitor
+from pytorch_lightning.callbacks import ModelCheckpoint, Callback, LearningRateMonitor, EarlyStopping
 from pytorch_lightning.utilities.distributed import rank_zero_only
 from pytorch_lightning.utilities import rank_zero_info
 
@@ -103,7 +104,7 @@ def get_parser(**parser_kwargs):
         "-s",
         "--seed",
         type=int,
-        default=23,
+        default=None,
         help="seed for seed_everything",
     )
     parser.add_argument(
@@ -117,7 +118,7 @@ def get_parser(**parser_kwargs):
         "-l",
         "--logdir",
         type=str,
-        default="logs",
+        default="logs/",
         help="directory for logging dat shit",
     )
     parser.add_argument(
@@ -224,7 +225,7 @@ class DataModuleFromConfig(pl.LightningDataModule):
                           shuffle=shuffle)
 
     def _test_dataloader(self, shuffle=False):
-        is_iterable_dataset = isinstance(self.datasets['train'], Txt2ImgIterableBaseDataset)
+        is_iterable_dataset = isinstance(self.datasets['test'], Txt2ImgIterableBaseDataset)
         if is_iterable_dataset or self.use_worker_init_fn:
             init_fn = worker_init_fn
         else:
@@ -295,7 +296,7 @@ class SetupCallback(Callback):
 
 
 class ImageLogger(Callback):
-    def __init__(self, batch_frequency, max_images, clamp=True, increase_log_steps=True,
+    def __init__(self, batch_frequency, max_images, clamp=False, increase_log_steps=True,
                  rescale=True, disabled=False, log_on_batch_idx=False, log_first_step=False,
                  log_images_kwargs=None):
         super().__init__()
@@ -305,15 +306,17 @@ class ImageLogger(Callback):
         self.logger_log_images = {
             pl.loggers.TestTubeLogger: self._testtube,
         }
-        self.log_steps = [2 ** n for n in range(int(np.log2(self.batch_freq)) + 1)]
+        self.log_steps_train = [9 ** n for n in range(int(np.log(self.batch_freq) / np.log(9)) + 1)]
+        self.log_steps_val = torch.arange(0, 75, step=(75 // 3))
+        self.log_steps_test = torch.arange(0, 25, step=(25 // 5))
         if not increase_log_steps:
             self.log_steps = [self.batch_freq]
         self.clamp = clamp
         self.disabled = disabled
         self.log_on_batch_idx = log_on_batch_idx
         self.log_images_kwargs = log_images_kwargs if log_images_kwargs else {}
-        self.log_first_step = log_first_step
-
+        self.log_first_step = log_first_step 
+    
     @rank_zero_only
     def _testtube(self, pl_module, images, batch_idx, split):
         for k in images:
@@ -359,10 +362,14 @@ class ImageLogger(Callback):
 
     def log_img(self, pl_module, batch, batch_idx, split="train"):
         check_idx = batch_idx if self.log_on_batch_idx else pl_module.global_step
-        if (split=="val" and  # batch_idx % self.batch_freq == 0
-                hasattr(pl_module, "log_images") and
-                callable(pl_module.log_images) and
-                self.max_images > 0):
+
+        if (split=="train" and  # batch_idx % self.batch_freq == 0
+            # self.check_frequency(check_idx) and
+            # check_idx in self.log_steps_train and
+            check_idx == 700 and
+            hasattr(pl_module, "log_images") and
+            callable(pl_module.log_images) and
+            self.max_images > 0):
             logger = type(pl_module.logger)
 
             is_train = pl_module.training
@@ -390,6 +397,72 @@ class ImageLogger(Callback):
             if is_train:
                 pl_module.train()
 
+        if (split=="val" and  # batch_idx % self.batch_freq == 0
+            # self.check_frequency(check_idx) and
+            # (check_idx in self.log_steps_val or check_idx == 74) and
+            check_idx == 50 and
+            hasattr(pl_module, "log_images") and
+            callable(pl_module.log_images) and
+            self.max_images > 0):
+            logger = type(pl_module.logger)
+
+            is_train = pl_module.training
+            if is_train:
+                pl_module.eval()
+
+            with torch.no_grad():
+                images = pl_module.log_images(batch, split=split, **self.log_images_kwargs)
+
+            for k in images:
+                N = min(images[k].shape[0], self.max_images)
+                images[k] = images[k][:N]
+                if isinstance(images[k], torch.Tensor):
+                    images[k] = images[k].detach().cpu()
+                    if self.clamp:
+                        print("Info: Clamping images")
+                        images[k] = torch.clamp(images[k], -1., 1.)
+
+            self.log_local(pl_module.logger.save_dir, split, images,
+                           pl_module.global_step, pl_module.current_epoch, batch_idx)
+
+            logger_log_images = self.logger_log_images.get(logger, lambda *args, **kwargs: None)
+            logger_log_images(pl_module, images, pl_module.global_step, split)
+
+            if is_train:
+                pl_module.train()
+
+        if (split=="test" and  # batch_idx % self.batch_freq == 0
+            # self.check_frequency(check_idx) and
+            # (check_idx in self.log_steps_test or check_idx == 24) and
+            # check_idx == 13 and
+            # check_idx in [6, 13, 21] and
+            hasattr(pl_module, "log_images") and
+            callable(pl_module.log_images) and
+            self.max_images > 0):
+            logger = type(pl_module.logger)
+
+            is_train = pl_module.training
+            if is_train:
+                pl_module.eval()
+
+            with torch.no_grad():
+                images = pl_module.log_images(batch, split=split, **self.log_images_kwargs)
+
+            for k in images:
+                N = min(images[k].shape[0], self.max_images)
+                images[k] = images[k][:N]
+                if isinstance(images[k], torch.Tensor):
+                    images[k] = images[k].detach().cpu()
+                    if self.clamp:
+                        print("Info: Clamping images")
+                        images[k] = torch.clamp(images[k], -1., 1.)
+
+            self.log_local(pl_module.logger.save_dir, split, images,
+                           pl_module.global_step, pl_module.current_epoch, batch_idx)
+
+            logger_log_images = self.logger_log_images.get(logger, lambda *args, **kwargs: None)
+            logger_log_images(pl_module, images, pl_module.global_step, split)
+
     def check_frequency(self, check_idx):
         if ((check_idx % self.batch_freq) == 0 or (check_idx in self.log_steps)) and (
                 check_idx > 0 or self.log_first_step):
@@ -402,12 +475,19 @@ class ImageLogger(Callback):
         return False
 
     def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx):
-        if not self.disabled and (pl_module.global_step > 0 or self.log_first_step):
+        if not self.disabled and (pl_module.global_step > 0 or self.log_first_step or self.log_on_batch_idx):
             self.log_img(pl_module, batch, batch_idx, split="train")
 
     def on_validation_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx):
-        if not self.disabled and pl_module.global_step > 0:
+        if not self.disabled and (pl_module.global_step > 0 or self.log_on_batch_idx):
             self.log_img(pl_module, batch, batch_idx, split="val")
+        if hasattr(pl_module, 'calibrate_grad_norm'):
+            if (pl_module.calibrate_grad_norm and batch_idx % 25 == 0) and batch_idx > 0:
+                self.log_gradients(trainer, pl_module, batch_idx=batch_idx)
+
+    def on_test_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx):
+        if not self.disabled and (pl_module.global_step > 0 or self.log_on_batch_idx):
+            self.log_img(pl_module, batch, batch_idx, split="test")
         if hasattr(pl_module, 'calibrate_grad_norm'):
             if (pl_module.calibrate_grad_norm and batch_idx % 25 == 0) and batch_idx > 0:
                 self.log_gradients(trainer, pl_module, batch_idx=batch_idx)
@@ -421,7 +501,7 @@ class CUDACallback(Callback):
         torch.cuda.synchronize(trainer.root_gpu)
         self.start_time = time.time()
 
-    def on_train_epoch_end(self, trainer, pl_module, outputs):
+    def on_train_epoch_end(self, trainer, pl_module):
         torch.cuda.synchronize(trainer.root_gpu)
         max_memory = torch.cuda.max_memory_allocated(trainer.root_gpu) / 2 ** 20
         epoch_time = time.time() - self.start_time
@@ -434,6 +514,20 @@ class CUDACallback(Callback):
             rank_zero_info(f"Average Peak memory {max_memory:.2f}MiB")
         except AttributeError:
             pass
+
+def save_used_seeds(used_seed):
+    with open("used_seeds.txt", "a") as file:
+        file.write(f"{used_seed}" + ",")
+
+
+def load_used_seeds():
+    try:
+        with open("used_seeds.txt", "r") as file:
+            lines = file.readlines()
+            used_seeds = [int(seed) for seed in lines[0].split(",") if seed != ""]
+            return used_seeds
+    except FileNotFoundError:
+        return []
 
 
 if __name__ == "__main__":
@@ -485,6 +579,8 @@ if __name__ == "__main__":
     # (in particular `main.DataModuleFromConfig`)
     sys.path.append(os.getcwd())
 
+    used_seeds = load_used_seeds()
+
     parser = get_parser()
     parser = Trainer.add_argparse_args(parser)
 
@@ -528,7 +624,17 @@ if __name__ == "__main__":
 
     ckptdir = os.path.join(logdir, "checkpoints")
     cfgdir = os.path.join(logdir, "configs")
-    seed_everything(opt.seed)
+
+    if opt.seed is None:
+        seed = random.randint(1, 1000)
+        while seed in used_seeds:
+            seed = random.randint(1, 1000)
+        print(f"Generated unique seed: {seed}")
+        used_seed = seed
+        save_used_seeds(used_seed)
+        seed_everything(seed)
+    else:
+        seed_everything(opt.seed)
 
     try:
         # init and save configs
@@ -591,9 +697,12 @@ if __name__ == "__main__":
             "target": "pytorch_lightning.callbacks.ModelCheckpoint",
             "params": {
                 "dirpath": ckptdir,
-                "filename": "{epoch:06}",
+                "filename": "best_model_{epoch:06}",
                 "verbose": True,
-                "save_last": True,
+                "monitor": "val/loss_simple_ema",
+                "save_top_k": 1,
+                "mode": "min",
+                "save_last": False,
             }
         }
         if hasattr(model, "monitor"):
@@ -743,6 +852,7 @@ if __name__ == "__main__":
                 raise
         if not opt.no_test and not trainer.interrupted:
             trainer.test(model, data)
+        
     except Exception:
         if opt.debug and trainer.global_rank == 0:
             try:

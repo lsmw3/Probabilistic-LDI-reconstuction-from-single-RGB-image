@@ -6,6 +6,8 @@ https://github.com/CompVis/taming-transformers
 -- merci
 """
 
+import os
+import json
 import torch
 import torch.nn as nn
 import numpy as np
@@ -70,6 +72,7 @@ class DDPM(pl.LightningModule):
                  use_positional_encodings=False,
                  learn_logvar=False,
                  logvar_init=0.,
+                 loss_path=None,
                  ):
         super().__init__()
         assert parameterization in ["eps", "x0"], 'currently only supporting "eps" and "x0"'
@@ -106,6 +109,12 @@ class DDPM(pl.LightningModule):
                                linear_start=linear_start, linear_end=linear_end, cosine_s=cosine_s)
 
         self.loss_type = loss_type
+
+        self.train_loss_dict = None
+        self.val_loss_dict = None
+        self.test_loss_dict = None
+
+        self.loss_path = loss_path
 
         self.learn_logvar = learn_logvar
         self.logvar = torch.full(fill_value=logvar_init, size=(self.num_timesteps,))
@@ -338,7 +347,37 @@ class DDPM(pl.LightningModule):
         return loss, loss_dict
 
     def training_step(self, batch, batch_idx):
+        if batch_idx == 0 and self.train_loss_dict is not None:
+            for key in self.train_loss_dict:
+                self.train_loss_dict[key] = np.mean(self.train_loss_dict[key])
+
+            # save as json
+            train_loss_path = os.path.join(self.loss_path, "train_loss.json")
+
+            if not os.path.exists(self.loss_path):
+                os.makedirs(self.loss_path)
+
+            if not os.path.exists(train_loss_path):
+               with open(train_loss_path, "w") as f:
+                   json.dump([self.train_loss_dict], f)
+            else:
+               with open(train_loss_path, "r") as f:
+                   train_losses = json.load(f)
+               train_losses.append(self.train_loss_dict)
+               with open(train_loss_path, "w") as f:
+                   json.dump(train_losses, f)
+
+            self.train_loss_dict = None
+        
+        if self.train_loss_dict is None:
+            self.train_loss_dict = {}
+
         loss, loss_dict = self.shared_step(batch)
+
+        for key in loss_dict:
+            if key not in self.train_loss_dict:
+                self.train_loss_dict[key] = []
+            self.train_loss_dict[key].append(float(loss_dict[key].item()))
 
         self.log_dict(loss_dict, prog_bar=True,
                       logger=True, on_step=True, on_epoch=True)
@@ -354,12 +393,79 @@ class DDPM(pl.LightningModule):
 
     @torch.no_grad()
     def validation_step(self, batch, batch_idx):
+        if batch_idx == 0 and self.val_loss_dict is not None:
+            for key in self.val_loss_dict:
+                self.val_loss_dict[key] = np.mean(self.val_loss_dict[key])
+            
+            # save as json
+            val_loss_path = os.path.join(self.loss_path, "val_loss.json")
+
+            if not os.path.exists(self.loss_path):
+                os.makedirs(self.loss_path)
+
+            if not os.path.exists(val_loss_path):
+                with open(val_loss_path, "w") as f:
+                    json.dump([self.val_loss_dict], f)
+            else:
+                with open(val_loss_path, "r") as f:
+                    val_losses = json.load(f)
+                val_losses.append(self.val_loss_dict)
+                with open(val_loss_path, "w") as f:
+                    json.dump(val_losses, f)
+
+            self.val_loss_dict = None
+        
+        if self.val_loss_dict is None:
+            self.val_loss_dict = {}
+
         _, loss_dict_no_ema = self.shared_step(batch)
         with self.ema_scope():
             _, loss_dict_ema = self.shared_step(batch)
             loss_dict_ema = {key + '_ema': loss_dict_ema[key] for key in loss_dict_ema}
+
+
+        for key in loss_dict_ema:
+            if key not in self.val_loss_dict:
+                self.val_loss_dict[key] = []
+            self.val_loss_dict[key].append(float(loss_dict_ema[key].item()))
+
         self.log_dict(loss_dict_no_ema, prog_bar=False, logger=True, on_step=False, on_epoch=True)
         self.log_dict(loss_dict_ema, prog_bar=False, logger=True, on_step=False, on_epoch=True)
+
+    def test_step(self, batch, batch_idx):    
+        if self.test_loss_dict is None:
+            self.test_loss_dict = {}
+
+        _, test_loss_dict_no_ema = self.shared_step(batch)
+        with self.ema_scope():
+            _, test_loss_dict_ema = self.shared_step(batch)
+            test_loss_dict_ema = {key + '_ema_test': test_loss_dict_ema[key] for key in test_loss_dict_ema}
+
+        for key in test_loss_dict_ema:
+            if key not in self.test_loss_dict:
+                self.test_loss_dict[key] = []
+            self.test_loss_dict[key].append(float(test_loss_dict_ema[key].item()))
+
+        # save as json
+        test_loss_path = os.path.join(self.loss_path, "test_loss.json")
+
+        if not os.path.exists(self.loss_path):
+            os.makedirs(self.loss_path)
+
+        if not os.path.exists(test_loss_path):
+            with open(test_loss_path, "w") as f:
+                json.dump([self.test_loss_dict], f)
+        else:
+             with open(test_loss_path, "r") as f:
+                test_losses = json.load(f)
+             test_losses.append(self.test_loss_dict)
+             with open(test_loss_path, "w") as f:
+                json.dump(test_losses, f)
+
+        self.test_loss_dict = None
+
+        self.log_dict(test_loss_dict_no_ema, prog_bar=False, logger=True, on_step=False, on_epoch=True)
+        self.log_dict(test_loss_dict_ema, prog_bar=False, logger=True, on_step=False, on_epoch=True)
 
     def on_train_batch_end(self, *args, **kwargs):
         if self.use_ema:
@@ -1262,6 +1368,7 @@ class LatentDiffusion(DDPM):
         n_row = min(x.shape[0], n_row)
         log["inputs"] = x
         log["reconstruction"] = xrec
+        log["latent_code_gt"] = z
         if self.model.conditioning_key is not None:
             if hasattr(self.cond_stage_model, "decode"):
                 xc = self.cond_stage_model.decode(c)
@@ -1302,6 +1409,7 @@ class LatentDiffusion(DDPM):
                                                          ddim_steps=ddim_steps, eta=ddim_eta)
                 # samples, z_denoise_row = self.sample(cond=c, batch_size=N, return_intermediates=True)
             x_samples = self.decode_first_stage(samples)
+            log["latent_code_sample"] = samples
             log["samples"] = x_samples
             if plot_denoise_rows:
                 denoise_grid = self._get_denoise_row_from_list(z_denoise_row)

@@ -1,7 +1,7 @@
 data:
   params:
-    batch_size: 8
-    num_workers: 8
+    batch_size: 2
+    num_workers: 4
     train:
       params:
         apply_positional_encoding: false
