@@ -1,0 +1,5 @@
+train:
+python main.py --base configs/autoencoder-kl-f4.yaml -t --gpus "0,"
+
+test:
+python main.py --base configs/autoencoder-kl-f4.yaml --gpus "0,"
